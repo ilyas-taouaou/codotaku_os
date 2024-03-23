@@ -64,10 +64,10 @@ impl Writer {
         }
     }
 
-    pub fn write_byte(&mut self, ascii_character: u8) {
-        match ascii_character {
+    pub fn write_byte(&mut self, byte: u8) {
+        match byte {
             b'\n' => self.new_line(),
-            byte => {
+            ascii_character => {
                 if self.column_position >= BUFFER_WIDTH {
                     self.new_line();
                 }
