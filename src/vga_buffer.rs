@@ -1,4 +1,14 @@
+use core::{fmt, ops::Range};
+use itertools::Itertools;
+use lazy_static::lazy_static;
+use spin::Mutex;
 use volatile::Volatile;
+
+const BUFFER_HEIGHT: usize = 25;
+const BUFFER_WIDTH: usize = 80;
+const VGA_BUFFER_ADDRESS: usize = 0xb8000;
+const UNRECOGNIZED_CHARACTER: u8 = 0xfe;
+const BUFFER_COLS: Range<usize> = 0..BUFFER_WIDTH;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,17 +32,9 @@ pub enum Color {
     White = 15,
 }
 
-const VGA_BUFFER_ADDRESS: usize = 0xb8000;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
 struct ColorCode(u8);
-
-impl ColorCode {
-    fn new(foreground: Color, background: Color) -> ColorCode {
-        ColorCode((background as u8) << 4 | (foreground as u8))
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
@@ -40,9 +42,6 @@ struct ScreenChar {
     ascii_character: u8,
     color_code: ColorCode,
 }
-
-const BUFFER_HEIGHT: usize = 25;
-const BUFFER_WIDTH: usize = 80;
 
 #[repr(transparent)]
 struct Buffer {
@@ -54,80 +53,6 @@ pub struct Writer {
     color_code: ColorCode,
     buffer: &'static mut Buffer,
 }
-
-impl Writer {
-    pub fn new() -> Self {
-        Self {
-            column_position: 0,
-            color_code: ColorCode::new(Color::Yellow, Color::Black),
-            buffer: unsafe { &mut *(VGA_BUFFER_ADDRESS as *mut Buffer) },
-        }
-    }
-
-    pub fn write_byte(&mut self, byte: u8) {
-        match byte {
-            b'\n' => self.new_line(),
-            ascii_character => {
-                if self.column_position >= BUFFER_WIDTH {
-                    self.new_line();
-                }
-
-                let row = BUFFER_HEIGHT - 1;
-                let col = self.column_position;
-
-                let color_code = self.color_code;
-                self.buffer.chars[row][col].write(ScreenChar {
-                    ascii_character,
-                    color_code,
-                });
-                self.column_position += 1;
-            }
-        }
-    }
-
-    fn new_line(&mut self) {
-        for row in 1..BUFFER_HEIGHT {
-            for col in 0..BUFFER_WIDTH {
-                let character = self.buffer.chars[row][col].read();
-                self.buffer.chars[row - 1][col].write(character);
-            }
-        }
-        self.clear_row(BUFFER_HEIGHT - 1);
-        self.column_position = 0;
-    }
-
-    fn clear_row(&mut self, row: usize) {
-        let blank = ScreenChar {
-            ascii_character: b' ',
-            color_code: self.color_code,
-        };
-        for col in 0..BUFFER_WIDTH {
-            self.buffer.chars[row][col].write(blank);
-        }
-    }
-
-    pub fn write_string(&mut self, s: &str) {
-        for byte in s.bytes() {
-            match byte {
-                b' '..=b'~' | b'\n' => self.write_byte(byte),
-                _ => self.write_byte(0xfe),
-            }
-        }
-    }
-}
-
-use core::fmt;
-
-impl fmt::Write for Writer {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        self.write_string(s);
-        Ok(())
-    }
-}
-
-use lazy_static::lazy_static;
-
-use spin::Mutex;
 
 lazy_static! {
     pub static ref WRITER: Mutex<Writer> = Mutex::new(Writer::new());
@@ -148,4 +73,72 @@ macro_rules! println {
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
     WRITER.lock().write_fmt(args).unwrap();
+}
+
+impl ColorCode {
+    fn new(foreground: Color, background: Color) -> ColorCode {
+        ColorCode((background as u8) << 4 | (foreground as u8))
+    }
+}
+
+impl Writer {
+    fn new() -> Self {
+        Self {
+            column_position: 0,
+            color_code: ColorCode::new(Color::Yellow, Color::Black),
+            buffer: unsafe { &mut *(VGA_BUFFER_ADDRESS as *mut Buffer) },
+        }
+    }
+
+    fn write(&mut self, row: usize, col: usize, ascii_character: u8) {
+        self.buffer.chars[row][col].write(ScreenChar {
+            ascii_character,
+            color_code: self.color_code,
+        });
+    }
+
+    fn read(&self, row: usize, col: usize) -> u8 {
+        self.buffer.chars[row][col].read().ascii_character
+    }
+
+    fn write_byte(&mut self, byte: u8) {
+        match byte {
+            b'\n' => self.new_line(),
+            ascii_character => {
+                if self.column_position >= BUFFER_WIDTH {
+                    self.new_line();
+                }
+                self.write(BUFFER_HEIGHT - 1, self.column_position, ascii_character);
+                self.column_position += 1;
+            }
+        }
+    }
+
+    fn new_line(&mut self) {
+        BUFFER_COLS
+            .cartesian_product(1..BUFFER_HEIGHT)
+            .for_each(|(col, row)| self.write(row - 1, col, self.read(row, col)));
+        self.clear_row(BUFFER_HEIGHT - 1);
+        self.column_position = 0;
+    }
+
+    fn clear_row(&mut self, row: usize) {
+        BUFFER_COLS.for_each(|col| self.write(row, col, b' '));
+    }
+
+    pub fn write_string(&mut self, s: &str) {
+        s.bytes()
+            .map(|byte| match byte {
+                b' '..=b'~' | b'\n' => byte,
+                _ => UNRECOGNIZED_CHARACTER,
+            })
+            .for_each(|byte| self.write_byte(byte));
+    }
+}
+
+impl fmt::Write for Writer {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        self.write_string(s);
+        Ok(())
+    }
 }
